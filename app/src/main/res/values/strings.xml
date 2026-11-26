@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">JarvisOS</string>
+    <string name="accessibility_service_label">JarvisOS Live Control</string>
+    <string name="accessibility_service_description">Allows JarvisOS Live Mode to read screen elements and perform user-approved actions on real apps.</string>
+</resources>
