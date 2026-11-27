@@ -3,8 +3,22 @@ package com.jarvis.os.data
 import java.util.UUID
 
 enum class ExecutionMode {
+    AUTO,
     SANDBOX,
     LIVE
+}
+
+enum class ThinkingLevel(val label: String, val badge: String) {
+    LOW("Low • Fast", "LOW"),
+    MEDIUM("Medium", "MED"),
+    HIGH("High • Deep", "HIGH"),
+    XHIGH("XHigh • Orchestrator", "XHIGH")
+}
+
+enum class SecurityVerdict(val label: String) {
+    PASS("PASS"),
+    WARN("WARN"),
+    BLOCKED("BLOCKED")
 }
 
 enum class ProviderType(
@@ -14,7 +28,7 @@ enum class ProviderType(
 ) {
     GEMINI(
         displayName = "Gemini API",
-        defaultModel = "gemini-3.8-flash",
+        defaultModel = "gemini-3.5-flash-lite",
         defaultBaseUrl = "https://generativelanguage.googleapis.com"
     ),
     GROQ(
@@ -89,7 +103,39 @@ data class PendingSkillInstall(
     val securitySafe: Boolean,
     val securityReport: String,
     val targetMode: ExecutionMode = ExecutionMode.SANDBOX,
-    val status: InstallStatus = InstallStatus.WAITING_APPROVAL
+    val status: InstallStatus = InstallStatus.WAITING_APPROVAL,
+    val verdict: SecurityVerdict = SecurityVerdict.PASS
+)
+
+data class DiscoveredSkill(
+    val repoFullName: String,
+    val repoUrl: String,
+    val title: String,
+    val description: String,
+    val stars: Int,
+    val verdict: SecurityVerdict,
+    val auditSummary: String
+)
+
+data class SubAgentProgress(
+    val name: String,
+    val role: String,
+    val progress: Float,
+    val status: String
+)
+
+data class DeviceVideoItem(
+    val name: String,
+    val path: String,
+    val sizeMb: String
+)
+
+data class AttachedMedia(
+    val type: String,
+    val name: String,
+    val uriString: String,
+    val base64Data: String = "",
+    val mimeType: String = ""
 )
 
 data class RoutineStep(
@@ -106,7 +152,8 @@ data class RoutineFlow(
     val steps: List<RoutineStep>,
     val enabled: Boolean = true,
     val lastRunStatus: String = "Auto-saved • Active",
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val eventTrigger: String = ""
 )
 
 data class PendingRoutineApproval(
@@ -141,7 +188,12 @@ data class ChatMessage(
     val pendingRoutine: PendingRoutineApproval? = null,
     val artifact: ArtifactPreview? = null,
     val actionApproval: ActionApproval? = null,
-    val showCapabilities: Boolean = false
+    val showCapabilities: Boolean = false,
+    val isBtw: Boolean = false,
+    val subAgents: List<SubAgentProgress> = emptyList(),
+    val discoveredSkills: List<DiscoveredSkill> = emptyList(),
+    val deviceVideos: List<DeviceVideoItem> = emptyList(),
+    val attachedMedia: AttachedMedia? = null
 )
 
 data class SandboxApp(
