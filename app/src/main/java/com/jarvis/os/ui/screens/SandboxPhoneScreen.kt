@@ -73,6 +73,7 @@ fun SandboxPhoneScreen(
 ) {
     var showInstallDialog by remember { mutableStateOf(false) }
     var lastLoadedUrl by remember { mutableStateOf("") }
+    var lastLoadedHtml by remember { mutableStateOf<String?>(null) }
 
     val engine = remember {
         SandboxWebEngine(
@@ -82,8 +83,19 @@ fun SandboxPhoneScreen(
         )
     }
 
-    LaunchedEffect(state.activeSandboxUrl) {
-        if (state.activeSandboxUrl.isNotBlank() && state.activeSandboxUrl != lastLoadedUrl) {
+    // Playable HTML / Mini-App Runner (Tic Tac Toe, HyperFrames, Custom Web Apps!)
+    LaunchedEffect(state.activeSandboxHtml) {
+        val html = state.activeSandboxHtml
+        if (!html.isNullOrBlank() && html != lastLoadedHtml) {
+            lastLoadedHtml = html
+            engine.loadHtmlContent(html)
+        }
+    }
+
+    // Normal Sandbox URL Runner
+    LaunchedEffect(state.activeSandboxUrl, state.activeSandboxHtml) {
+        if (state.activeSandboxHtml.isNullOrBlank() && state.activeSandboxUrl.isNotBlank() && state.activeSandboxUrl != lastLoadedUrl) {
+            lastLoadedHtml = null
             lastLoadedUrl = state.activeSandboxUrl
             engine.navigateTo(state.activeSandboxUrl)
         }
@@ -113,18 +125,15 @@ fun SandboxPhoneScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             state.sandboxApps.forEach { app ->
-                val isSelected = state.activeSandboxApp?.id == app.id
+                val isSelected = state.activeSandboxHtml.isNullOrBlank() && state.activeSandboxApp?.id == app.id
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(14.dp))
                         .background(if (isSelected) NaxSandboxPurple.copy(alpha = 0.25f) else NaxCard)
-                        .border(
-                            1.dp,
-                            if (isSelected) NaxSandboxPurple else NaxBorder,
-                            RoundedCornerShape(14.dp)
-                        )
+                        .border(1.dp, if (isSelected) NaxSandboxPurple else NaxBorder, RoundedCornerShape(14.dp))
                         .clickable {
                             viewModel.openSandboxApp(app)
+                            lastLoadedHtml = null
                             lastLoadedUrl = app.url
                             engine.navigateTo(app.url)
                         }
@@ -142,7 +151,6 @@ fun SandboxPhoneScreen(
                 }
             }
 
-            // + Install New App inside Sandbox Phone
             Row(
                 modifier = Modifier
                     .clip(RoundedCornerShape(14.dp))
@@ -165,7 +173,7 @@ fun SandboxPhoneScreen(
                 .fillMaxWidth(),
             shape = RoundedCornerShape(22.dp),
             color = NaxSurface,
-            border = BorderStroke(1.5.dp, NaxSandboxPurple.copy(alpha = 0.6f))
+            border = BorderStroke(1.5.dp, if (!state.activeSandboxHtml.isNullOrBlank()) NaxGreen.copy(alpha = 0.7f) else NaxSandboxPurple.copy(alpha = 0.6f))
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
                 // Virtual Phone Top Control Bar
@@ -179,20 +187,28 @@ fun SandboxPhoneScreen(
                     IconButton(onClick = { engine.goBack() }, modifier = Modifier.size(32.dp)) {
                         Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back", tint = NaxTextPrimary, modifier = Modifier.size(18.dp))
                     }
-                    IconButton(onClick = { engine.reload() }, modifier = Modifier.size(32.dp)) {
+                    IconButton(
+                        onClick = {
+                            if (!state.activeSandboxHtml.isNullOrBlank()) engine.loadHtmlContent(state.activeSandboxHtml)
+                            else engine.reload()
+                        },
+                        modifier = Modifier.size(32.dp)
+                    ) {
                         Icon(Icons.Rounded.Refresh, contentDescription = "Reload", tint = NaxTextPrimary, modifier = Modifier.size(18.dp))
                     }
 
                     Text(
-                        text = state.activeSandboxApp?.name ?: "Sandbox Device",
-                        color = NaxTextPrimary,
+                        text = if (!state.activeSandboxHtml.isNullOrBlank())
+                            "🎮 ${state.activeSandboxHtmlTitle}"
+                        else
+                            state.activeSandboxApp?.name ?: "Sandbox Device",
+                        color = if (!state.activeSandboxHtml.isNullOrBlank()) NaxGreen else NaxTextPrimary,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.weight(1f).padding(horizontal = 6.dp),
                         maxLines = 1
                     )
 
-                    // X-Ray Control Map Toggle
                     SandboxToolPill(
                         icon = Icons.Rounded.Visibility,
                         label = "X-Ray",
@@ -202,7 +218,6 @@ fun SandboxPhoneScreen(
                     )
                     Spacer(Modifier.width(4.dp))
 
-                    // Teach AI Toggle
                     SandboxToolPill(
                         icon = Icons.Rounded.School,
                         label = "Teach",
@@ -211,11 +226,8 @@ fun SandboxPhoneScreen(
                         onClick = { viewModel.toggleTeachMode() }
                     )
 
-                    IconButton(
-                        onClick = { engine.clearSandboxSessionData() },
-                        modifier = Modifier.size(30.dp)
-                    ) {
-                        Icon(Icons.Rounded.DeleteSweep, contentDescription = "Reset Sandbox", tint = NaxTextSecondary, modifier = Modifier.size(16.dp))
+                    IconButton(onClick = { engine.clearSandboxSessionData() }, modifier = Modifier.size(30.dp)) {
+                        Icon(Icons.Rounded.DeleteSweep, contentDescription = "Reset", tint = NaxTextSecondary, modifier = Modifier.size(16.dp))
                     }
                 }
 
@@ -230,13 +242,14 @@ fun SandboxPhoneScreen(
                                     ViewGroup.LayoutParams.MATCH_PARENT
                                 )
                                 lastLoadedUrl = state.activeSandboxUrl
-                                engine.attach(this, state.activeSandboxUrl)
+                                lastLoadedHtml = state.activeSandboxHtml
+                                engine.attach(this, state.activeSandboxUrl, state.activeSandboxHtml)
                             }
                         }
                     )
                 }
 
-                // AI Control Blueprint Bar (Shows NAX how to control everything inside this Sandbox app)
+                // AI Control Blueprint Bar
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -247,7 +260,7 @@ fun SandboxPhoneScreen(
                         Icon(Icons.Rounded.TouchApp, contentDescription = null, tint = NaxCyan, modifier = Modifier.size(14.dp))
                         Spacer(Modifier.width(5.dp))
                         Text(
-                            text = "AI Control Map (${state.sandboxControls.size} elements) • Tap any tag to test",
+                            text = "AI Control Map (${state.sandboxControls.size} elements) • Tap to test",
                             color = NaxCyan,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
@@ -265,11 +278,7 @@ fun SandboxPhoneScreen(
                     Spacer(Modifier.height(6.dp))
 
                     if (state.sandboxControls.isEmpty()) {
-                        Text(
-                            text = "Page load hone par saare clickable controls automatically map ho jayenge.",
-                            color = NaxTextSecondary,
-                            fontSize = 11.sp
-                        )
+                        Text("Page ya mini-app load hone par controls map ho jayenge.", color = NaxTextSecondary, fontSize = 11.sp)
                     } else {
                         Row(
                             modifier = Modifier
@@ -286,11 +295,7 @@ fun SandboxPhoneScreen(
                                         .clickable { engine.clickControlIndex(node.index) }
                                         .padding(horizontal = 8.dp, vertical = 4.dp)
                                 ) {
-                                    Text(
-                                        text = "[${node.index}] ${node.text.take(20)}",
-                                        color = NaxTextPrimary,
-                                        fontSize = 10.sp
-                                    )
+                                    Text("[${node.index}] ${node.text.take(20)}", color = NaxTextPrimary, fontSize = 10.sp)
                                 }
                             }
                         }
@@ -311,7 +316,6 @@ fun SandboxPhoneScreen(
         }
     }
 
-    // Dialog to Install a New App into Sandbox Phone
     if (showInstallDialog) {
         var appName by remember { mutableStateOf("") }
         var appUrl by remember { mutableStateOf("") }
@@ -324,28 +328,13 @@ fun SandboxPhoneScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "Isolated Virtual Phone mein koi bhi app/web-app add karo — NAX iske saare controls auto-map kar lega.",
+                        "Isolated Virtual Phone mein koi bhi app/web-app add karo — NAX saare controls auto-map kar lega.",
                         color = NaxTextSecondary,
                         fontSize = 12.sp
                     )
-                    OutlinedTextField(
-                        value = appName,
-                        onValueChange = { appName = it },
-                        label = { Text("App Name (e.g. X, Notion, Studio)") },
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = appUrl,
-                        onValueChange = { appUrl = it },
-                        label = { Text("App URL (e.g. studio.youtube.com)") },
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = appEmoji,
-                        onValueChange = { appEmoji = it },
-                        label = { Text("Icon Emoji") },
-                        singleLine = true
-                    )
+                    OutlinedTextField(value = appName, onValueChange = { appName = it }, label = { Text("App Name") }, singleLine = true)
+                    OutlinedTextField(value = appUrl, onValueChange = { appUrl = it }, label = { Text("App URL") }, singleLine = true)
+                    OutlinedTextField(value = appEmoji, onValueChange = { appEmoji = it }, label = { Text("Icon Emoji") }, singleLine = true)
                 }
             },
             confirmButton = {
