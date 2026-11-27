@@ -264,7 +264,6 @@ private fun NaxRootShell(
 
                     Spacer(Modifier.weight(1f))
 
-                    // Offline Voice Output Speaker Toggle
                     IconButton(
                         onClick = { viewModel.toggleVoiceOutput() },
                         modifier = Modifier
@@ -282,7 +281,6 @@ private fun NaxRootShell(
 
                     Spacer(Modifier.width(8.dp))
 
-                    // 24/7 Companion + Floating Orb Power Toggle
                     IconButton(
                         onClick = { viewModel.toggleForegroundEngine() },
                         modifier = Modifier
@@ -346,7 +344,7 @@ private fun NaxRootShell(
                 0 -> NaxChatScreen(
                     state = state,
                     viewModel = viewModel,
-                    voiceText = voiceText,
+                    voiceInputText = voiceText,
                     onVoiceConsumed = onVoiceConsumed,
                     onVoiceClick = onStartVoice,
                     onPickMedia = onPickMedia
