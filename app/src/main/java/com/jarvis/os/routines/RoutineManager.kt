@@ -20,6 +20,10 @@ import com.jarvis.os.data.ExecutionMode
 import com.jarvis.os.data.RoutineFlow
 import com.jarvis.os.data.RoutineStep
 import com.jarvis.os.data.VaultStorage
+import com.jarvis.os.live.FloatingNaxOverlay
+import com.jarvis.os.live.NaxLiveLogger
+import com.jarvis.os.live.NaxMood
+import com.jarvis.os.live.NaxVoiceEngine
 import java.util.Calendar
 import java.util.concurrent.TimeUnit
 
@@ -28,53 +32,63 @@ object RoutineManager {
     private const val CHANNEL_ID = "nax_routines_channel"
 
     fun parseFlowFromChat(message: String, defaultMode: ExecutionMode): RoutineFlow {
-        val triggerTime = extractTriggerTime(message)
-        val frequency = detectFrequency(message)
+        val lower = message.lowercase()
 
-        // Split multi-step Hinglish/English instructions into clean n8n-style nodes
+        // Detect Always-On Event Trigger vs Scheduled Time Trigger
+        val eventTrigger = when {
+            lower.contains("battery") && (lower.contains("20") || lower.contains("low") || lower.contains("kam") || lower.contains("niche")) -> "BATTERY_LOW"
+            lower.contains("charg") -> "CHARGER_CONNECTED"
+            lower.contains("naya video") || lower.contains("new video") -> "NEW_VIDEO"
+            else -> "TIME"
+        }
+
+        val triggerLabel = when (eventTrigger) {
+            "BATTERY_LOW" -> "Always-On • Battery < 20%"
+            "CHARGER_CONNECTED" -> "Always-On • On Charger"
+            "NEW_VIDEO" -> "Always-On • New Video"
+            else -> extractTriggerTime(message)
+        }
+
+        val frequency = if (eventTrigger != "TIME") "Always-On" else detectFrequency(message)
+        val effectiveDefault = if (defaultMode == ExecutionMode.AUTO) ExecutionMode.SANDBOX else defaultMode
+
         val rawParts = message
             .split(Regex("""\b(aur|phir|fir|then|and then)\b|,""", RegexOption.IGNORE_CASE))
             .map { it.trim() }
             .filter { it.length > 4 }
 
         val steps = if (rawParts.isEmpty()) {
-            listOf(
-                RoutineStep(
-                    mode = defaultMode,
-                    label = "Execute Command",
-                    command = message.trim()
-                )
-            )
+            listOf(RoutineStep(mode = effectiveDefault, label = "Execute Command", command = message.trim()))
         } else {
             rawParts.take(4).mapIndexed { index, part ->
-                val lower = part.lowercase()
+                val p = part.lowercase()
                 val stepMode = when {
-                    lower.contains("live") || lower.contains("real phone") -> ExecutionMode.LIVE
-                    lower.contains("sandbox") -> ExecutionMode.SANDBOX
-                    else -> defaultMode
+                    p.contains("live") || p.contains("real phone") || p.contains("brightness") || p.contains("instagram") -> ExecutionMode.LIVE
+                    p.contains("sandbox") || p.contains("private") -> ExecutionMode.SANDBOX
+                    else -> effectiveDefault
                 }
-                RoutineStep(
-                    mode = stepMode,
-                    label = "Step ${index + 1} (${stepMode.name})",
-                    command = part
-                )
+                RoutineStep(mode = stepMode, label = "Step ${index + 1} (${stepMode.name})", command = part)
             }
         }
 
-        val cleanTitle = buildRoutineTitle(message, triggerTime)
         return RoutineFlow(
-            title = cleanTitle,
-            triggerTime = triggerTime,
+            title = buildRoutineTitle(message, triggerLabel),
+            triggerTime = triggerLabel,
             frequency = frequency,
             steps = steps,
             enabled = true,
-            lastRunStatus = "Daily Routine • Auto-Saved"
+            lastRunStatus = if (eventTrigger != "TIME") "Always-On Event • Active" else "Daily Routine • Auto-Saved",
+            eventTrigger = eventTrigger
         )
     }
 
     fun scheduleRoutine(context: Context, flow: RoutineFlow) {
         if (!flow.enabled) {
             cancelRoutine(context, flow.id)
+            return
+        }
+        if (flow.eventTrigger.isNotBlank() && flow.eventTrigger != "TIME") {
+            NaxLiveLogger.log("⚡", "Always-On Routine activated: ${flow.title}")
             return
         }
 
@@ -88,7 +102,7 @@ object RoutineManager {
         val input = workDataOf(
             "routine_id" to flow.id,
             "routine_title" to flow.title,
-            "routine_command" to (flow.steps.joinToString(" → ") { it.command })
+            "routine_command" to flow.steps.joinToString(" → ") { it.command }
         )
 
         val request = PeriodicWorkRequestBuilder<NaxRoutineWorker>(repeatHours, TimeUnit.HOURS)
@@ -101,6 +115,7 @@ object RoutineManager {
             ExistingPeriodicWorkPolicy.UPDATE,
             request
         )
+        NaxLiveLogger.log("⏰", "Scheduled Routine: ${flow.title}")
     }
 
     fun cancelRoutine(context: Context, flowId: String) {
@@ -109,7 +124,7 @@ object RoutineManager {
 
     private fun extractTriggerTime(text: String): String {
         val lower = text.lowercase()
-        val amPmMatch = Regex("""(\d{1,2})(?::(\d{2}))?\s*(am|pm)""").find(lower)
+        val amPmMatch = Regex("""\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b""").find(lower)
         if (amPmMatch != null) {
             val h = amPmMatch.groupValues[1]
             val m = amPmMatch.groupValues[2].ifBlank { "00" }
@@ -117,7 +132,7 @@ object RoutineManager {
             return "$h:$m $meridiem"
         }
 
-        val bajeMatch = Regex("""(\d{1,2})(?::(\d{2}))?\s*baje""").find(lower)
+        val bajeMatch = Regex("""\b(\d{1,2})(?::(\d{2}))?\s*baje\b""").find(lower)
         if (bajeMatch != null) {
             val h = bajeMatch.groupValues[1]
             val m = bajeMatch.groupValues[2].ifBlank { "00" }
@@ -140,19 +155,19 @@ object RoutineManager {
     private fun detectFrequency(text: String): String {
         val lower = text.lowercase()
         return when {
-            lower.contains("hour") || lower.contains("har ghante") -> "Hourly"
-            lower.contains("week") || lower.contains("har hafte") -> "Weekly"
+            lower.contains("hourly") || lower.contains("har ghante") -> "Hourly"
+            lower.contains("weekly") || lower.contains("har hafte") -> "Weekly"
             else -> "Daily"
         }
     }
 
-    private fun buildRoutineTitle(message: String, triggerTime: String): String {
+    private fun buildRoutineTitle(message: String, triggerLabel: String): String {
         val trimmed = message
-            .replace(Regex("""\b(roz|roj|daily|every day|har roz|subah|shaam|raat|baje|\d{1,2}(:\d{2})?\s*(am|pm)?)\b""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""\b(roz|roj|daily|every day|har roz|subah|shaam|raat|baje|routine|schedule|\d{1,2}(:\d{2})?\s*(am|pm)?)\b""", RegexOption.IGNORE_CASE), "")
             .replace(Regex("""\s+"""), " ")
             .trim()
-        val core = if (trimmed.length >= 6) trimmed.take(36) else "Automated NAX Flow"
-        return "${core.replaceFirstChar { it.uppercase() }} ($triggerTime)"
+        val core = if (trimmed.length >= 6) trimmed.take(34) else "NAX Auto Flow"
+        return "${core.replaceFirstChar { it.uppercase() }} ($triggerLabel)"
     }
 
     private fun computeInitialDelayMillis(triggerTime: String): Long {
@@ -169,9 +184,7 @@ object RoutineManager {
             target.set(Calendar.HOUR_OF_DAY, hour)
             target.set(Calendar.MINUTE, minute)
             target.set(Calendar.SECOND, 0)
-            if (target.before(now)) {
-                target.add(Calendar.DAY_OF_YEAR, 1)
-            }
+            if (target.before(now)) target.add(Calendar.DAY_OF_YEAR, 1)
             return (target.timeInMillis - now.timeInMillis).coerceAtLeast(60_000L)
         }
         return TimeUnit.MINUTES.toMillis(15)
@@ -184,7 +197,7 @@ object RoutineManager {
                 "NAX Daily Routines",
                 NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
-                description = "Notifications when NAX runs your scheduled n8n-style daily routines."
+                description = "Notifications when NAX runs your scheduled n8n-style routines."
             }
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.createNotificationChannel(channel)
@@ -202,20 +215,18 @@ class NaxRoutineWorker(
     override suspend fun doWork(): Result {
         val routineId = inputData.getString("routine_id").orEmpty()
         val title = inputData.getString("routine_title") ?: "NAX Routine"
-        val command = inputData.getString("routine_command") ?: "Scheduled task ready"
+        val command = inputData.getString("routine_command") ?: "Scheduled task triggered"
 
-        // Update routine status in VaultStorage
         val vault = VaultStorage(applicationContext)
         val updated = vault.loadRoutines().map { flow ->
-            if (flow.id == routineId) {
-                flow.copy(lastRunStatus = "Last triggered automatically ✓")
-            } else {
-                flow
-            }
+            if (flow.id == routineId) flow.copy(lastRunStatus = "Last triggered automatically ✓") else flow
         }
         vault.saveRoutines(updated)
 
-        // Post local notification if permission granted
+        NaxLiveLogger.log("⏰", "Routine fired: $title")
+        FloatingNaxOverlay.peekStatus(applicationContext, NaxMood.WORKING, "Routine: $title", command.take(90), 6000L)
+        NaxVoiceEngine.speak(applicationContext, "Boss, routine $title chal gaya hai.")
+
         RoutineManager.ensureNotificationChannel(applicationContext)
         val hasPerm = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
             ContextCompat.checkSelfPermission(
@@ -233,7 +244,6 @@ class NaxRoutineWorker(
                 .build()
             NotificationManagerCompat.from(applicationContext).notify(routineId.hashCode(), notif)
         }
-
         return Result.success()
     }
 }
