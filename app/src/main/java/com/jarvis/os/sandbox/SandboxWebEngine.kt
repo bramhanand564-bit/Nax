@@ -21,7 +21,7 @@ class SandboxWebEngine(
     private var teachEnabled: Boolean = false
 
     @SuppressLint("SetJavaScriptEnabled")
-    fun attach(view: WebView, initialUrl: String) {
+    fun attach(view: WebView, initialUrl: String, initialHtml: String? = null) {
         webView = view
         view.settings.apply {
             javaScriptEnabled = true
@@ -44,7 +44,7 @@ class SandboxWebEngine(
         view.webViewClient = object : WebViewClient() {
             override fun onPageFinished(v: WebView?, url: String?) {
                 super.onPageFinished(v, url)
-                if (!url.isNullOrBlank()) {
+                if (!url.isNullOrBlank() && !url.startsWith("https://nax.sandbox.local")) {
                     onUrlChanged(url)
                 }
                 scanControlBlueprint(showBadges = xrayEnabled)
@@ -54,7 +54,9 @@ class SandboxWebEngine(
             }
         }
 
-        if (view.url.isNullOrBlank()) {
+        if (!initialHtml.isNullOrBlank()) {
+            loadHtmlContent(initialHtml)
+        } else if (view.url.isNullOrBlank()) {
             view.loadUrl(initialUrl)
         }
     }
@@ -66,6 +68,32 @@ class SandboxWebEngine(
             "https://$url"
         }
         webView?.post { webView?.loadUrl(normalized) }
+    }
+
+    fun loadHtmlContent(html: String) {
+        val wrapped = if (html.lowercase().contains("<html")) {
+            html
+        } else {
+            """
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <style>body{background:#0B0E17;color:#F8FAFC;font-family:sans-serif;padding:16px;margin:0;}</style>
+            </head>
+            <body>$html</body>
+            </html>
+            """.trimIndent()
+        }
+        webView?.post {
+            webView?.loadDataWithBaseURL(
+                "https://nax.sandbox.local/",
+                wrapped,
+                "text/html",
+                "UTF-8",
+                null
+            )
+        }
     }
 
     fun goBack() {
@@ -92,7 +120,7 @@ class SandboxWebEngine(
         val js = """
             (function() {
                 document.querySelectorAll('.nax-xray-badge').forEach(el => el.remove());
-                const candidates = Array.from(document.querySelectorAll('a, button, input, textarea, [role="button"], [contenteditable="true"]'));
+                const candidates = Array.from(document.querySelectorAll('a, button, input, textarea, [role="button"], [contenteditable="true"], .cell'));
                 const results = [];
                 let idx = 0;
                 for (const el of candidates) {
