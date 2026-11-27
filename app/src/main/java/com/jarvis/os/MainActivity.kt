@@ -4,9 +4,14 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.speech.RecognizerIntent
+import android.util.Base64
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -25,6 +30,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.VolumeOff
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.PhoneAndroid
@@ -45,19 +52,18 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModelProvider
+import com.jarvis.os.data.AttachedMedia
 import com.jarvis.os.data.ExecutionMode
 import com.jarvis.os.ui.screens.BrainLabScreen
 import com.jarvis.os.ui.screens.NaxChatScreen
 import com.jarvis.os.ui.screens.RoutinesScreen
 import com.jarvis.os.ui.screens.SandboxPhoneScreen
 import com.jarvis.os.ui.theme.NaxBg
-import com.jarvis.os.ui.theme.NaxBorder
 import com.jarvis.os.ui.theme.NaxCard
 import com.jarvis.os.ui.theme.NaxCyan
 import com.jarvis.os.ui.theme.NaxGreen
@@ -70,11 +76,13 @@ import com.jarvis.os.ui.theme.NaxTheme
 import com.jarvis.os.viewmodel.NaxUiState
 import com.jarvis.os.viewmodel.NaxViewModel
 import kotlinx.coroutines.delay
+import java.io.ByteArrayOutputStream
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var naxViewModel: NaxViewModel
     private val capturedVoiceText = mutableStateOf("")
+    private var lastPickedMime: String = "image/*"
 
     private val speechLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -82,9 +90,15 @@ class MainActivity : ComponentActivity() {
         if (result.resultCode == Activity.RESULT_OK) {
             val matches = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
             val spoken = matches?.firstOrNull().orEmpty()
-            if (spoken.isNotBlank()) {
-                capturedVoiceText.value = spoken
-            }
+            if (spoken.isNotBlank()) capturedVoiceText.value = spoken
+        }
+    }
+
+    private val mediaPickerLauncher = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            handlePickedMediaUri(uri)
         }
     }
 
@@ -101,9 +115,7 @@ class MainActivity : ComponentActivity() {
                 this,
                 Manifest.permission.POST_NOTIFICATIONS
             ) == PackageManager.PERMISSION_GRANTED
-            if (!granted) {
-                notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
+            if (!granted) notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
 
         setContent {
@@ -114,7 +126,11 @@ class MainActivity : ComponentActivity() {
                     viewModel = naxViewModel,
                     voiceText = capturedVoiceText.value,
                     onVoiceConsumed = { capturedVoiceText.value = "" },
-                    onStartVoice = { startVoiceRecognition() }
+                    onStartVoice = { startVoiceRecognition() },
+                    onPickMedia = { mime ->
+                        lastPickedMime = mime
+                        mediaPickerLauncher.launch(mime)
+                    }
                 )
             }
         }
@@ -123,7 +139,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         if (::naxViewModel.isInitialized) {
-            naxViewModel.refreshLiveStatus()
+            naxViewModel.refreshPermissionsAndStatus()
         }
     }
 
@@ -139,6 +155,64 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(this, "Voice recognition available nahi hai is device par.", Toast.LENGTH_SHORT).show()
         }
     }
+
+    private fun handlePickedMediaUri(uri: Uri) {
+        val detectedMime = contentResolver.getType(uri) ?: lastPickedMime
+        val fileName = queryDisplayName(uri)
+        val type = when {
+            detectedMime.startsWith("image") -> "photo"
+            detectedMime.startsWith("video") -> "video"
+            else -> "audio"
+        }
+
+        val base64Image = if (type == "photo") encodeScaledImageBase64(uri) else ""
+        naxViewModel.setPendingAttachment(
+            AttachedMedia(
+                type = type,
+                name = fileName,
+                uriString = uri.toString(),
+                base64Data = base64Image,
+                mimeType = if (type == "photo") "image/jpeg" else detectedMime
+            )
+        )
+    }
+
+    private fun queryDisplayName(uri: Uri): String {
+        return try {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
+            } ?: "media_file"
+        } catch (_: Exception) {
+            "media_file"
+        }
+    }
+
+    private fun encodeScaledImageBase64(uri: Uri): String {
+        return try {
+            val stream = contentResolver.openInputStream(uri) ?: return ""
+            val original = BitmapFactory.decodeStream(stream)
+            stream.close()
+            if (original == null) return ""
+
+            val maxDim = 1024
+            val scaled = if (original.width > maxDim || original.height > maxDim) {
+                val ratio = minOf(maxDim.toFloat() / original.width, maxDim.toFloat() / original.height)
+                Bitmap.createScaledBitmap(
+                    original,
+                    (original.width * ratio).toInt().coerceAtLeast(1),
+                    (original.height * ratio).toInt().coerceAtLeast(1),
+                    true
+                )
+            } else {
+                original
+            }
+            val out = ByteArrayOutputStream()
+            scaled.compress(Bitmap.CompressFormat.JPEG, 78, out)
+            Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+        } catch (_: Exception) {
+            ""
+        }
+    }
 }
 
 @Composable
@@ -147,7 +221,8 @@ private fun NaxRootShell(
     viewModel: NaxViewModel,
     voiceText: String,
     onVoiceConsumed: () -> Unit,
-    onStartVoice: () -> Unit
+    onStartVoice: () -> Unit,
+    onPickMedia: (String) -> Unit
 ) {
     LaunchedEffect(state.bannerMessage) {
         if (state.bannerMessage.isNotBlank()) {
@@ -166,7 +241,6 @@ private fun NaxRootShell(
                         .padding(horizontal = 14.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // NAX Brand Header
                     Box(
                         modifier = Modifier
                             .size(30.dp)
@@ -180,18 +254,35 @@ private fun NaxRootShell(
                     Spacer(Modifier.width(10.dp))
                     Column {
                         Text("NAX", color = NaxTextPrimary, fontWeight = FontWeight.ExtraBold, fontSize = 17.sp)
-                        val modeColor = if (state.executionMode == ExecutionMode.SANDBOX) NaxSandboxPurple else NaxLiveRed
-                        Text(
-                            text = if (state.executionMode == ExecutionMode.SANDBOX) "Sandbox Mode Active" else "Live Phone Mode Active",
-                            color = modeColor,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
+                        val (modeLabel, modeColor) = when (state.executionMode) {
+                            ExecutionMode.AUTO -> "Auto Smart Mode Active" to NaxCyan
+                            ExecutionMode.SANDBOX -> "Sandbox Mode Active" to NaxSandboxPurple
+                            ExecutionMode.LIVE -> "Live Phone Mode Active" to NaxLiveRed
+                        }
+                        Text(modeLabel, color = modeColor, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                     }
 
                     Spacer(Modifier.weight(1f))
 
-                    // 24/7 Foreground Engine Quick Button
+                    // Offline Voice Output Speaker Toggle
+                    IconButton(
+                        onClick = { viewModel.toggleVoiceOutput() },
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (state.voiceOutputEnabled) NaxCyan.copy(alpha = 0.18f) else NaxCard)
+                    ) {
+                        Icon(
+                            imageVector = if (state.voiceOutputEnabled) Icons.AutoMirrored.Rounded.VolumeUp else Icons.AutoMirrored.Rounded.VolumeOff,
+                            contentDescription = "Voice Output",
+                            tint = if (state.voiceOutputEnabled) NaxCyan else NaxTextSecondary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
+                    Spacer(Modifier.width(8.dp))
+
+                    // 24/7 Companion + Floating Orb Power Toggle
                     IconButton(
                         onClick = { viewModel.toggleForegroundEngine() },
                         modifier = Modifier
@@ -201,7 +292,7 @@ private fun NaxRootShell(
                     ) {
                         Icon(
                             Icons.Rounded.PowerSettingsNew,
-                            contentDescription = "24/7 Engine",
+                            contentDescription = "24/7 Companion",
                             tint = if (state.engineRunning) NaxGreen else NaxTextSecondary,
                             modifier = Modifier.size(18.dp)
                         )
@@ -221,10 +312,7 @@ private fun NaxRootShell(
             }
         },
         bottomBar = {
-            NavigationBar(
-                containerColor = NaxSurface,
-                tonalElevation = 0.dp
-            ) {
+            NavigationBar(containerColor = NaxSurface, tonalElevation = 0.dp) {
                 val navItems = listOf(
                     Triple(0, "NAX", Icons.Rounded.AutoAwesome),
                     Triple(1, "Sandbox", Icons.Rounded.PhoneAndroid),
@@ -258,22 +346,14 @@ private fun NaxRootShell(
                 0 -> NaxChatScreen(
                     state = state,
                     viewModel = viewModel,
-                    voiceInputText = voiceText,
+                    voiceText = voiceText,
                     onVoiceConsumed = onVoiceConsumed,
-                    onVoiceClick = onStartVoice
+                    onVoiceClick = onStartVoice,
+                    onPickMedia = onPickMedia
                 )
-                1 -> SandboxPhoneScreen(
-                    state = state,
-                    viewModel = viewModel
-                )
-                2 -> RoutinesScreen(
-                    state = state,
-                    viewModel = viewModel
-                )
-                3 -> BrainLabScreen(
-                    state = state,
-                    viewModel = viewModel
-                )
+                1 -> SandboxPhoneScreen(state = state, viewModel = viewModel)
+                2 -> RoutinesScreen(state = state, viewModel = viewModel)
+                3 -> BrainLabScreen(state = state, viewModel = viewModel)
             }
         }
     }
