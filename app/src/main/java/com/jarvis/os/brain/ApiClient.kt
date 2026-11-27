@@ -2,6 +2,7 @@ package com.jarvis.os.brain
 
 import com.jarvis.os.data.ApiConfig
 import com.jarvis.os.data.ProviderType
+import com.jarvis.os.live.NaxLiveLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -27,15 +28,17 @@ object ApiClient {
 
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(45, TimeUnit.SECONDS)
-        .writeTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(65, TimeUnit.SECONDS)
+        .writeTimeout(25, TimeUnit.SECONDS)
         .build()
 
     suspend fun chat(
         config: ApiConfig,
         systemPrompt: String,
         history: List<Pair<Boolean, String>>,
-        userMessage: String
+        userMessage: String,
+        imageBase64: String? = null,
+        imageMimeType: String = "image/jpeg"
     ): ApiCallResponse = withContext(Dispatchers.IO) {
         val start = System.currentTimeMillis()
         try {
@@ -43,21 +46,23 @@ object ApiClient {
                 return@withContext ApiCallResponse(
                     success = false,
                     providerName = config.provider.displayName,
-                    error = "${config.provider.displayName} key missing. Brain Lab mein API key daalein."
+                    error = "${config.provider.displayName} key missing."
                 )
             }
 
             when (config.provider) {
-                ProviderType.GEMINI -> callGemini(config, systemPrompt, history, userMessage, start)
-                ProviderType.CLAUDE -> callClaude(config, systemPrompt, history, userMessage, start)
+                ProviderType.GEMINI -> callGemini(config, systemPrompt, history, userMessage, imageBase64, imageMimeType, start)
+                ProviderType.CLAUDE -> callClaude(config, systemPrompt, history, userMessage, imageBase64, imageMimeType, start)
                 ProviderType.GROQ,
                 ProviderType.LOCAL,
-                ProviderType.CUSTOM -> callOpenAiCompatible(config, systemPrompt, history, userMessage, start)
+                ProviderType.CUSTOM -> callOpenAiCompatible(config, systemPrompt, history, userMessage, imageBase64, imageMimeType, start)
             }
         } catch (e: Exception) {
+            val latency = System.currentTimeMillis() - start
+            NaxLiveLogger.recordApiCall(config.provider.displayName, latency, ok = false, is429 = false, detail = e.message.orEmpty())
             ApiCallResponse(
                 success = false,
-                latencyMs = System.currentTimeMillis() - start,
+                latencyMs = latency,
                 providerName = config.provider.displayName,
                 error = e.message ?: "Network error"
             )
@@ -69,6 +74,8 @@ object ApiClient {
         systemPrompt: String,
         history: List<Pair<Boolean, String>>,
         userMessage: String,
+        imageBase64: String?,
+        imageMimeType: String,
         start: Long
     ): ApiCallResponse {
         val base = config.baseUrl.trimEnd('/')
@@ -81,17 +88,27 @@ object ApiClient {
                 put("parts", JSONArray().put(JSONObject().put("text", msg)))
             })
         }
+
+        val userParts = JSONArray().apply {
+            put(JSONObject().put("text", userMessage))
+            if (!imageBase64.isNullOrBlank()) {
+                put(JSONObject().put("inline_data", JSONObject().apply {
+                    put("mime_type", imageMimeType.ifBlank { "image/jpeg" })
+                    put("data", imageBase64)
+                }))
+            }
+        }
         contents.put(JSONObject().apply {
             put("role", "user")
-            put("parts", JSONArray().put(JSONObject().put("text", userMessage)))
+            put("parts", userParts)
         })
 
         val payload = JSONObject().apply {
             put("system_instruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt))))
             put("contents", contents)
             put("generationConfig", JSONObject().apply {
-                put("temperature", 0.6)
-                put("maxOutputTokens", 1500)
+                put("temperature", 0.5)
+                put("maxOutputTokens", 8192)
             })
         }
 
@@ -104,24 +121,33 @@ object ApiClient {
             val latency = System.currentTimeMillis() - start
             val raw = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
+                val err = extractErrorMessage(raw)
+                NaxLiveLogger.recordApiCall(config.model, latency, ok = false, is429 = resp.code == 429, detail = "HTTP ${resp.code}: $err")
                 return ApiCallResponse(
                     success = false,
                     latencyMs = latency,
                     providerName = config.provider.displayName,
-                    error = "HTTP ${resp.code}: ${extractErrorMessage(raw)}"
+                    error = "HTTP ${resp.code}: $err"
                 )
             }
             val json = JSONObject(raw)
-            val text = json.optJSONArray("candidates")
+            val parts = json.optJSONArray("candidates")
                 ?.optJSONObject(0)
                 ?.optJSONObject("content")
                 ?.optJSONArray("parts")
-                ?.optJSONObject(0)
-                ?.optString("text")
-                .orEmpty()
-                .trim()
+            val sb = StringBuilder()
+            if (parts != null) {
+                for (i in 0 until parts.length()) {
+                    val p = parts.optJSONObject(i)
+                    if (p != null && !p.optBoolean("thought", false)) {
+                        sb.append(p.optString("text", ""))
+                    }
+                }
+            }
+            val text = sb.toString().trim()
             val tokens = json.optJSONObject("usageMetadata")?.optLong("totalTokenCount", 0L)
                 ?: ((userMessage.length + text.length) / 4L)
+            NaxLiveLogger.recordApiCall(config.model, latency, ok = text.isNotBlank(), is429 = false, detail = "$tokens tok")
             return ApiCallResponse(
                 success = text.isNotBlank(),
                 text = text,
@@ -138,6 +164,8 @@ object ApiClient {
         systemPrompt: String,
         history: List<Pair<Boolean, String>>,
         userMessage: String,
+        imageBase64: String?,
+        imageMimeType: String,
         start: Long
     ): ApiCallResponse {
         val base = config.baseUrl.trimEnd('/')
@@ -150,14 +178,36 @@ object ApiClient {
                 put("content", msg)
             })
         }
-        messages.put(JSONObject().apply {
-            put("role", "user")
-            put("content", userMessage)
-        })
+
+        if (!imageBase64.isNullOrBlank()) {
+            val blocks = JSONArray().apply {
+                put(JSONObject().apply {
+                    put("type", "image")
+                    put("source", JSONObject().apply {
+                        put("type", "base64")
+                        put("media_type", imageMimeType.ifBlank { "image/jpeg" })
+                        put("data", imageBase64)
+                    })
+                })
+                put(JSONObject().apply {
+                    put("type", "text")
+                    put("text", userMessage)
+                })
+            }
+            messages.put(JSONObject().apply {
+                put("role", "user")
+                put("content", blocks)
+            })
+        } else {
+            messages.put(JSONObject().apply {
+                put("role", "user")
+                put("content", userMessage)
+            })
+        }
 
         val payload = JSONObject().apply {
             put("model", config.model.trim())
-            put("max_tokens", 1500)
+            put("max_tokens", 4096)
             put("system", systemPrompt)
             put("messages", messages)
         }
@@ -174,11 +224,13 @@ object ApiClient {
             val latency = System.currentTimeMillis() - start
             val raw = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
+                val err = extractErrorMessage(raw)
+                NaxLiveLogger.recordApiCall(config.model, latency, ok = false, is429 = resp.code == 429, detail = "HTTP ${resp.code}: $err")
                 return ApiCallResponse(
                     success = false,
                     latencyMs = latency,
                     providerName = config.provider.displayName,
-                    error = "HTTP ${resp.code}: ${extractErrorMessage(raw)}"
+                    error = "HTTP ${resp.code}: $err"
                 )
             }
             val json = JSONObject(raw)
@@ -190,6 +242,7 @@ object ApiClient {
             val usage = json.optJSONObject("usage")
             val tokens = (usage?.optLong("input_tokens", 0L) ?: 0L) +
                 (usage?.optLong("output_tokens", 0L) ?: 0L)
+            NaxLiveLogger.recordApiCall(config.model, latency, ok = text.isNotBlank(), is429 = false, detail = "$tokens tok")
             return ApiCallResponse(
                 success = text.isNotBlank(),
                 text = text,
@@ -206,6 +259,8 @@ object ApiClient {
         systemPrompt: String,
         history: List<Pair<Boolean, String>>,
         userMessage: String,
+        imageBase64: String?,
+        imageMimeType: String,
         start: Long
     ): ApiCallResponse {
         val base = config.baseUrl.trimEnd('/')
@@ -222,17 +277,34 @@ object ApiClient {
                     put("content", msg)
                 })
             }
-            put(JSONObject().apply {
-                put("role", "user")
-                put("content", userMessage)
-            })
+            if (!imageBase64.isNullOrBlank()) {
+                val contentArr = JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("type", "text")
+                        put("text", userMessage)
+                    })
+                    put(JSONObject().apply {
+                        put("type", "image_url")
+                        put("image_url", JSONObject().put("url", "data:${imageMimeType.ifBlank { "image/jpeg" }};base64,$imageBase64"))
+                    })
+                }
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", contentArr)
+                })
+            } else {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", userMessage)
+                })
+            }
         }
 
         val payload = JSONObject().apply {
             put("model", config.model.trim())
             put("messages", messages)
-            put("temperature", 0.6)
-            put("max_tokens", 1500)
+            put("temperature", 0.5)
+            put("max_tokens", 4096)
         }
 
         val builder = Request.Builder()
@@ -248,11 +320,13 @@ object ApiClient {
             val latency = System.currentTimeMillis() - start
             val raw = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
+                val err = extractErrorMessage(raw)
+                NaxLiveLogger.recordApiCall(config.model, latency, ok = false, is429 = resp.code == 429, detail = "HTTP ${resp.code}: $err")
                 return ApiCallResponse(
                     success = false,
                     latencyMs = latency,
                     providerName = config.provider.displayName,
-                    error = "HTTP ${resp.code}: ${extractErrorMessage(raw)}"
+                    error = "HTTP ${resp.code}: $err"
                 )
             }
             val json = JSONObject(raw)
@@ -264,6 +338,7 @@ object ApiClient {
                 .trim()
             val tokens = json.optJSONObject("usage")?.optLong("total_tokens", 0L)
                 ?: ((userMessage.length + text.length) / 4L)
+            NaxLiveLogger.recordApiCall(config.model, latency, ok = text.isNotBlank(), is429 = false, detail = "$tokens tok")
             return ApiCallResponse(
                 success = text.isNotBlank(),
                 text = text,
