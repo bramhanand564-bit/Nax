@@ -66,7 +66,7 @@ class JarvisForegroundService : Service() {
             val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
             val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
             val pct = if (level >= 0 && scale > 0) (level * 100) / scale else return
-            val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+            val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
             val charging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
 
             if (!charging && pct in 1..20 && !lowBatteryAlerted) {
@@ -160,7 +160,6 @@ class JarvisForegroundService : Service() {
                         val hour = cal.get(Calendar.HOUR_OF_DAY)
                         val today = dayFmt.format(Date())
 
-                        // Good Morning Briefing (7 AM - 9 AM once per day)
                         if (hour in 7..9 && NaxCompanionPrefs.getLastBriefingDate(this@JarvisForegroundService, "last_morning") != today) {
                             NaxCompanionPrefs.setLastBriefingDate(this@JarvisForegroundService, "last_morning", today)
                             val bat = DeviceSensorBridge.getBatteryPercent(this@JarvisForegroundService)
@@ -171,7 +170,6 @@ class JarvisForegroundService : Service() {
                             NaxVoiceEngine.speak(this@JarvisForegroundService, msg)
                         }
 
-                        // Good Night Recap (22:00 / 10 PM - 11 PM once per day)
                         if (hour in 22..23 && NaxCompanionPrefs.getLastBriefingDate(this@JarvisForegroundService, "last_night") != today) {
                             NaxCompanionPrefs.setLastBriefingDate(this@JarvisForegroundService, "last_night", today)
                             val tel = VaultStorage(this@JarvisForegroundService).loadTelemetry()
